@@ -44,6 +44,11 @@ def load_vectorstore():
 
 
 if __name__ == "__main__":
+    # Aseguramos que esta carpeta esté en sys.path, sin importar cómo se invocó
+    # el script (algunos entornos, como Render, no la añaden automáticamente).
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+
     # Prueba aislada: construye el índice desde cero y lanza un par de queries manuales
     # para confirmar que el retrieval trae fragmentos relevantes ANTES de conectar el LLM.
     from ingest import load_documents, split_documents
