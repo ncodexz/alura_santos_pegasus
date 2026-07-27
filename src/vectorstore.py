@@ -9,6 +9,7 @@ Render.
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 from pinecone import Pinecone
 
@@ -44,7 +45,7 @@ def build_vectorstore(chunks):
 
     records = []
     for i, chunk in enumerate(chunks):
-        source = chunk.metadata.get("source", "desconocido")
+        source = Path(chunk.metadata.get("source", "desconocido")).name
         records.append(
             {
                 "_id": f"chunk-{i}",
