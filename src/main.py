@@ -10,16 +10,16 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from agent import ask, get_vectorstore
+from agent import ask, get_index
 
 app = FastAPI(title="Alura Agente - Santos Pegasus Soluciones")
 
 
 @app.on_event("startup")
 def preload_vectorstore():
-    # Carga el índice FAISS + modelo de embeddings al arrancar, no en la
-    # primera pregunta — evita que el primer usuario espere de más.
-    get_vectorstore()
+    # Abre la conexión al índice de Pinecone al arrancar, no en la primera
+    # pregunta — evita que el primer usuario espere de más.
+    get_index()
 
 
 class Question(BaseModel):

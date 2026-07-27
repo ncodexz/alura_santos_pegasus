@@ -1,64 +1,99 @@
 """
-Capa 2: Vector store + retrieval.
+Capa 2: Índice vectorial (Pinecone, con embeddings integrados).
 
-Convierte los chunks en embeddings y los indexa en FAISS para poder buscar,
-dada una pregunta, los fragmentos más relevantes por similitud semántica.
-
-Los embeddings son locales (HuggingFace/sentence-transformers), no de Groq —
-Groq solo se usa para generar la respuesta final (ver agent.py).
+Pinecone genera los embeddings en sus propios servidores (modelo
+"multilingual-e5-large") y guarda + busca los vectores — nuestro servidor
+nunca carga ningún modelo pesado. Esto es lo que evita el problema de
+memoria que teníamos con FAISS + embeddings locales en el free tier de
+Render.
 """
 
-from pathlib import Path
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
+import os
+from dotenv import load_dotenv
+from pinecone import Pinecone
 
-INDEX_DIR = Path(__file__).parent.parent / "faiss_index"
+load_dotenv()
 
-# Modelo pequeño y rápido, corre en CPU sin problema, buena calidad para español.
-EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-
-
-def get_embeddings():
-    return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+INDEX_NAME = "alura-agente-santos-pegasus"
+NAMESPACE = "santos-pegasus"
 
 
-def build_vectorstore(chunks, save: bool = True):
-    """Crea el índice FAISS a partir de los chunks y opcionalmente lo guarda en disco."""
-    embeddings = get_embeddings()
-    vectorstore = FAISS.from_documents(chunks, embeddings)
+def get_client() -> Pinecone:
+    return Pinecone(api_key=os.environ["PINECONE_API_KEY"])
 
-    if save:
-        INDEX_DIR.mkdir(exist_ok=True)
-        vectorstore.save_local(str(INDEX_DIR))
-        print(f"Índice guardado en {INDEX_DIR}")
 
-    return vectorstore
+def get_or_create_index():
+    pc = get_client()
+    if not pc.has_index(INDEX_NAME):
+        pc.create_index_for_model(
+            name=INDEX_NAME,
+            cloud="aws",
+            region="us-east-1",
+            embed={
+                "model": "multilingual-e5-large",
+                "field_map": {"text": "chunk_text"},
+            },
+        )
+    index_config = pc.describe_index(INDEX_NAME)
+    return pc.Index(host=index_config.host)
+
+
+def build_vectorstore(chunks):
+    """Sube los chunks a Pinecone (crea el índice si no existe)."""
+    index = get_or_create_index()
+
+    records = []
+    for i, chunk in enumerate(chunks):
+        source = chunk.metadata.get("source", "desconocido")
+        records.append(
+            {
+                "_id": f"chunk-{i}",
+                "chunk_text": chunk.page_content,
+                "source": source,
+            }
+        )
+
+    # Pinecone recomienda subir en lotes pequeños (~90 registros) por request.
+    batch_size = 90
+    for i in range(0, len(records), batch_size):
+        batch = records[i : i + batch_size]
+        index.upsert_records(namespace=NAMESPACE, records=batch)
+        print(f"  Subidos {i + len(batch)}/{len(records)} chunks")
+
+    return index
 
 
 def load_vectorstore():
-    """Carga un índice FAISS ya guardado (evita re-procesar los PDFs cada vez)."""
-    embeddings = get_embeddings()
-    return FAISS.load_local(
-        str(INDEX_DIR), embeddings, allow_dangerous_deserialization=True
+    """Conecta al índice ya existente (no vuelve a subir nada)."""
+    return get_or_create_index()
+
+
+def search(index, query: str, k: int = 4):
+    """Busca los k fragmentos más relevantes para una pregunta."""
+    response = index.search(
+        namespace=NAMESPACE,
+        query={"inputs": {"text": query}, "top_k": k},
+        fields=["chunk_text", "source"],
     )
+    return response["result"]["hits"]
 
 
 if __name__ == "__main__":
-    # Aseguramos que esta carpeta esté en sys.path, sin importar cómo se invocó
-    # el script (algunos entornos, como Render, no la añaden automáticamente).
     import sys
+    from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent))
-
-    # Prueba aislada: construye el índice desde cero y lanza un par de queries manuales
-    # para confirmar que el retrieval trae fragmentos relevantes ANTES de conectar el LLM.
     from ingest import load_documents, split_documents
 
     print("Cargando y troceando documentos...")
     docs = load_documents()
     chunks = split_documents(docs)
 
-    print("Generando embeddings e indexando (puede tardar un poco la primera vez)...")
-    vs = build_vectorstore(chunks)
+    print(f"Subiendo {len(chunks)} chunks a Pinecone (embeddings integrados)...")
+    idx = build_vectorstore(chunks)
+
+    print("\nEsperando unos segundos a que Pinecone indexe...")
+    import time
+    time.sleep(10)
 
     test_queries = [
         "¿Cuál es el protocolo de respuesta a incidentes?",
@@ -67,7 +102,7 @@ if __name__ == "__main__":
 
     for q in test_queries:
         print(f"\n--- Query: {q} ---")
-        results = vs.similarity_search(q, k=2)
-        for r in results:
-            source = r.metadata.get("source", "?")
-            print(f"[{Path(source).name}] {r.page_content[:200]}...")
+        hits = search(idx, q, k=2)
+        for hit in hits:
+            fields = hit["fields"]
+            print(f"[{fields.get('source', '?')}] {fields.get('chunk_text', '')[:200]}...")
