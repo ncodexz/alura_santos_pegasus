@@ -19,6 +19,18 @@ está en el contexto, di claramente que no tienes esa información en los
 documentos disponibles — no inventes datos.
 Responde en español, de forma clara y directa."""
 
+# Cache global: el índice FAISS + modelo de embeddings se cargan UNA sola vez
+# (la primera pregunta), no en cada request. Recargarlos por petición es lo
+# que causaba respuestas lentas/colgadas en el free tier de Render.
+_vectorstore = None
+
+
+def get_vectorstore():
+    global _vectorstore
+    if _vectorstore is None:
+        _vectorstore = load_vectorstore()
+    return _vectorstore
+
 
 def get_client() -> OpenAI:
     return OpenAI(
@@ -42,7 +54,7 @@ def ask(question: str, k: int = 4) -> dict:
     Devuelve la respuesta junto con las fuentes usadas (para el README y para
     que el usuario final pueda verificar de dónde salió la respuesta).
     """
-    vectorstore = load_vectorstore()
+    vectorstore = get_vectorstore()
     relevant_chunks = vectorstore.similarity_search(question, k=k)
     context = build_context(relevant_chunks)
 
